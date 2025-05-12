@@ -21,7 +21,7 @@ import seaborn as sns
 import nltk
 
 # Set a custom data path suitable for Streamlit Cloud
-nltk_data_dir = '/main/nltk_data'
+nltk_data_dir = '/app/nltk_data'
 nltk.data.path.append(nltk_data_dir)
 
 # Ensure 'punkt' is downloaded to the custom directory
