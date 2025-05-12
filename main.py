@@ -17,13 +17,42 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Ensure necessary NLTK data is available
-# Streamlit Cloud allows downloads to the user's home directory
+# --- NLTK Setup ---
+# Define the NLTK resource required
+NLTK_DATA_RESOURCE = 'tokenizers/punkt'
+
+# Check if the resource is already available
 try:
-    nltk.data.find('tokenizers/punkt')
+    nltk.data.find(NLTK_DATA_RESOURCE)
+    # st.info(f"NLTK resource '{NLTK_DATA_RESOURCE}' found.") # Optional success message
 except LookupError:
-    st.info("Downloading NLTK punkt tokenizer...")
-    nltk.download('punkt', quiet=True)
+    # If not found, attempt to download it
+    st.warning(f"NLTK resource '{NLTK_DATA_RESOURCE}' not found. Attempting download of 'punkt'...")
+    try:
+        # Download the 'punkt' package
+        nltk.download('punkt', quiet=True)
+        st.success(f"NLTK 'punkt' package downloaded.")
+    except Exception as e:
+        # Catch potential errors during download
+        st.error(f"Error during NLTK 'punkt' download: {e}")
+        st.error("NLTK download failed. This is required for text processing.")
+        st.stop() # Stop the app if download fails
+
+# Final check: Ensure the resource is available AFTER the download attempt
+try:
+    nltk.data.find(NLTK_DATA_RESOURCE)
+    # If we reach here, the resource is confirmed available.
+except LookupError:
+    # If it's *still* not found after the download attempt, something is wrong with the environment or path
+    st.error(f"""
+    Fatal Error: NLTK resource '{NLTK_DATA_RESOURCE}' is still not found after attempting download.
+    This indicates a potential issue with NLTK data paths or permissions in the environment.
+    Please ensure NLTK can write to `/home/appuser/nltk_data` or check Streamlit Cloud logs.
+    The application cannot proceed without this resource for text tokenization.
+    """)
+    st.stop() # Stop the application gracefully if the resource is truly missing
+# --- End NLTK Setup ---
+
 
 # Set page config
 st.set_page_config(
@@ -88,7 +117,7 @@ def download_video(url):
         temp_dir = tempfile.gettempdir()
         # Use a more specific suffix to help systems recognize file type
         temp_path = os.path.join(temp_dir, f"{uuid.uuid4()}.mp4")
-        
+
         # Handle Loom URLs - This is a heuristic and may break if Loom changes its structure
         direct_url = url
         if "loom.com" in url:
@@ -104,27 +133,27 @@ def download_video(url):
             else:
                  # If pattern doesn't match, try the original URL, might fail
                  st.warning("Loom URL pattern not recognized. Trying original URL directly (may fail).")
-        
+
         # Set a timeout and headers to mimic a browser request
         headers = {'User-Agent': 'Mozilla/5.0'}
         # Added timeout for the request itself
-        response = requests.get(direct_url, stream=True, timeout=30, headers=headers) 
-        
+        response = requests.get(direct_url, stream=True, timeout=30, headers=headers)
+
         # Check for successful response
         response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
-        
+
         # Save to temporary file
         with open(temp_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=1024*1024): # 1MB chunks
                 if chunk:
                     f.write(chunk)
-        
+
         # Check if file was actually downloaded
         if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
              return None, "Download failed: The file was not downloaded correctly or is empty."
-             
+
         return temp_path, None
-    
+
     except requests.exceptions.Timeout:
         return None, "Download timed out. The URL was too slow to respond."
     except requests.exceptions.RequestException as req_err:
@@ -139,7 +168,7 @@ def extract_audio(video_path):
         # Create a temporary file for audio
         temp_dir = tempfile.gettempdir()
         audio_path = os.path.join(temp_dir, f"{uuid.uuid4()}.wav")
-        
+
         # FFmpeg command:
         # -i <video_path>: Input file
         # -vn: No video output
@@ -148,30 +177,29 @@ def extract_audio(video_path):
         # -ac 1: Audio channels (1 for mono, simplifies transcription)
         # -y: Overwrite output file without asking
         # -loglevel error: Suppress verbose FFmpeg output, show only errors
-        cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path, "-y", "-loglevel", "error"] 
-        
+        cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path, "-y", "-loglevel", "error"]
+
         # Run FFmpeg command
         # Use capture_output=True and text=True for easier error reading
         process = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        
+
         # Check if FFmpeg was successful
         if process.returncode != 0:
             # Log the error output from FFmpeg
-            st.error(f"FFmpeg command failed: {' '.join(cmd)}")
-            # st.error(f"FFmpeg STDOUT:\n{process.stdout}") # Can be noisy
+            st.error(f"FFmpeg command failed with error code {process.returncode}.")
             st.error(f"FFmpeg STDERR:\n{process.stderr}")
             return None, f"Error extracting audio with FFmpeg. FFmpeg Output:\n{process.stderr.strip()}"
-        
+
         # Check if file exists and has size > 0
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-            # Try to provide more context if stderr was empty but file wasn't created
+             # Try to provide more context if stderr was empty but file wasn't created
              error_msg = f"Failed to extract audio: Output audio file ({audio_path}) is empty or doesn't exist."
              if process.stderr:
                  error_msg += f"\nFFmpeg stderr: {process.stderr.strip()}"
              return None, error_msg
-        
+
         return audio_path, None
-    
+
     except FileNotFoundError:
         return None, "FFmpeg command not found. Please ensure FFmpeg is installed and in your system's PATH. On Streamlit Cloud, ensure 'ffmpeg' is listed in packages.txt."
     except Exception as e:
@@ -209,14 +237,14 @@ def transcribe_audio(audio_path):
         full_transcript = ""
 
         st.info(f"Splitting audio into {len(chunks)} chunks for transcription...")
-        
+
         chunk_progress_bar = st.progress(0) # Progress bar for chunks
-        
+
         for i, chunk in enumerate(chunks):
             # Update progress bar for current chunk
             chunk_progress = (i + 1) / len(chunks)
             chunk_progress_bar.progress(chunk_progress)
-            
+
             # Export chunk to temporary file
             # Use a unique filename for each chunk attempt
             chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4()}.wav")
@@ -237,7 +265,8 @@ def transcribe_audio(audio_path):
                 try:
                     # *** FIX APPLIED HERE: REMOVED timeout=10 ARGUMENT ***
                     # The 'timeout' argument is not supported in some versions of speech_recognition
-                    transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False) 
+                    # This was the source of the previous error.
+                    transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False)
                     full_transcript += " " + transcript
                 except sr.UnknownValueError:
                     # API was unable to understand the speech in this chunk
@@ -277,8 +306,16 @@ def analyze_accent(transcript):
     # Lowercased transcript for analysis
     text = transcript.lower()
 
-    # Tokenize
-    words = word_tokenize(text)
+    # Tokenize using NLTK's word_tokenize
+    # This is where the 'punkt' resource is used.
+    try:
+        words = word_tokenize(text)
+    except LookupError:
+         # This should ideally be caught by the initial NLTK setup block,
+         # but this is a fail-safe in case the resource check wasn't sufficient
+         return None, "NLTK 'punkt' tokenizer data is not available. Please ensure it is downloaded correctly."
+    except Exception as e:
+         return None, f"An unexpected error occurred during text tokenization: {str(e)}"
 
     # Track scores for each accent
     # Initialize scores with a small base value to avoid division by zero later if all scores are 0
@@ -366,20 +403,9 @@ def analyze_accent(transcript):
         # Further adjust confidence based on the absolute score magnitude
         # If the total score is very low, the confidence should be low regardless of relative proportion
         # This prevents a single weak indicator from giving high confidence if other scores are 0
-        # We can scale confidence based on the total score relative to some expectation
-        # Let's use a simple linear scaling for absolute score impact
-        # max_possible_heuristic_score_rough = (len(ACCENT_PATTERNS["American"]["word_markers"]) * WORD_MARKER_WEIGHT) + \
-        #                                      (len(ACCENT_PATTERNS["American"]["spelling_markers"]) * SPELLING_MARKER_WEIGHT) + \
-        #                                      (3 * PHONETIC_PATTERN_WEIGHT) # Assume max 3 phonetic matches per accent heuristic
-
-        # A simpler approach: Just scale by the log of the total score? Or cap based on total?
-        # If total score is very low (e.g., < 5), confidence should be low
-        # Let's use a piecewise function or another sigmoid based on total score
-        total_score_scaling = 1.0
-        if total_score < 5:
-            total_score_scaling = total_score / 5.0 # Scales from 0 to 1 for total scores 0-5
-        elif total_score < 20:
-             total_score_scaling = 0.8 + (total_score - 5) / 15.0 * 0.2 # Scales from 0.8 to 1.0 for total scores 5-20
+        # Let's use a simple scaling based on whether the total score is significant
+        total_score_threshold = 10 # Adjust threshold based on typical scores
+        total_score_scaling = min(1.0, total_score / total_score_threshold) # Scales from 0 to 1 up to the threshold
 
         confidence = transformed_confidence * total_score_scaling
 
@@ -393,22 +419,26 @@ def analyze_accent(transcript):
     second_best = None
     score_ratio = 'N/A'
     if scores_copy:
-        second_best = max(scores_copy, key=scores_copy.get)
-        best_score_val = scores[best_accent]
-        second_best_score_val = scores_copy.get(second_best, 0.1) # Use default 0.1 if no second best
-        if second_best_score_val > 0:
-             score_ratio = round(best_score_val / second_best_score_val, 2)
-        else:
-             score_ratio = 'Inf' # Best score is positive, second best is 0
+        # Ensure there's a second best with a score above the base value
+        filtered_scores_copy = {k: v for k, v in scores_copy.items() if v > 0.1}
+        if filtered_scores_copy:
+            second_best = max(filtered_scores_copy, key=filtered_scores_copy.get)
+            best_score_val = scores[best_accent]
+            second_best_score_val = filtered_scores_copy[second_best] # Get score from filtered dict
 
-        # Adjust confidence based on score ratio - A much higher score for the best accent increases confidence
-        # This is heuristic - apply a small boost/reduction
-        if isinstance(score_ratio, (int, float)):
-            if score_ratio < 1.5: # If best score is not much higher than second best
-                 confidence = confidence * 0.8 # Reduce confidence by 20%
-            elif score_ratio > 3.0: # If best score is significantly higher
-                 confidence = min(95.0, confidence * 1.1) # Slightly increase confidence (capped)
-            confidence = min(round(confidence, 1), 95.0) # Re-cap
+            if second_best_score_val > 0:
+                 score_ratio = round(best_score_val / second_best_score_val, 2)
+            else:
+                 score_ratio = 'Inf' # Should not happen with base score > 0, but defensive
+
+            # Adjust confidence based on score ratio - A much higher score for the best accent increases confidence
+            # This is heuristic - apply a small boost/reduction
+            if isinstance(score_ratio, (int, float)): # Check if score_ratio is a number
+                if score_ratio < 1.5: # If best score is not much higher than second best
+                     confidence = confidence * 0.85 # Reduce confidence slightly
+                elif score_ratio > 2.5: # If best score is significantly higher
+                     confidence = min(95.0, confidence * 1.1) # Slightly increase confidence (capped)
+                confidence = min(round(confidence, 1), 95.0) # Re-cap
 
     result = {
         "accent": best_accent,
@@ -440,40 +470,40 @@ def main():
     if not ffmpeg_installed:
         st.error("""
         ⚠️ FFmpeg command not found. This tool requires FFmpeg for audio extraction.
-        
-        **For Streamlit Cloud deployment:** Ensure you have a `packages.txt` file in your repository 
+
+        **For Streamlit Cloud deployment:** Ensure you have a `packages.txt` file in your repository
         containing the line `ffmpeg`.
-        
+
         **For local development:** Please install FFmpeg and ensure it's in your system's PATH.
         (e.g., `brew install ffmpeg` on macOS, `sudo apt update && sudo apt install ffmpeg` on Debian/Ubuntu Linux).
         """)
         st.stop()
-    
+
     # Input section
     st.header("1. Input Video")
-    
+
     url = st.text_input("Enter public video URL (MP4, MOV, WEBM, AVI or Loom link):",
                          help="For example: https://loom.com/share/your-video-id or https://example.com/video.mp4")
-    
+
     # Alternatively allow file upload
     uploaded_file = st.file_uploader("Or upload a video file (.mp4, .mov, .avi, .webm):", type=["mp4", "mov", "avi", "webm"])
-    
+
     # Add demo videos
     st.markdown("""
     **Try these sample links:**
     - American accent: `https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4`
     - British accent: `https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4`
     """)
-    
+
     # Process section
     if st.button("Analyze Accent", type="primary"):
         if not url and not uploaded_file:
             st.error("Please provide either a video URL or upload a video file.")
             return
-        
+
         # Use a main progress bar for overall steps
         main_progress = st.progress(0, text="Starting analysis...")
-        
+
         video_path = None
         audio_path = None
 
@@ -483,16 +513,16 @@ def main():
                 if not is_valid_url(url):
                     st.error("Please enter a valid URL (must start with http or https).")
                     return
-                
+
                 # Step 1: Download video
                 main_progress.progress(10, text="Downloading video...")
                 video_path, error = download_video(url)
-                
+
                 if error:
                     st.error(error)
                     return # Stop execution on error
                 main_progress.progress(25, text="Video downloaded. Proceeding to audio extraction...")
-                
+
             # Case 2: File uploaded
             else:
                 # Save uploaded file to temp location
@@ -515,48 +545,48 @@ def main():
             main_progress.progress(35, text="Extracting audio...")
             # Passing video_path acquired from either download or upload
             audio_path, error = extract_audio(video_path)
-            
+
             if error:
                 st.error(error)
                 return # Stop execution on error
             main_progress.progress(60, text="Audio extracted. Proceeding to transcription...")
-            
+
             # Step 3: Transcribe speech
             main_progress.progress(70, text="Transcribing speech...")
             # The transcribe_audio function now has its own progress info within it
             transcript, error = transcribe_audio(audio_path)
-            
+
             if error:
                 st.error(error)
                 return # Stop execution on error
-            
+
             if not transcript or len(transcript.strip()) < 20: # Check minimum length again after transcription
                 st.error("Could not detect enough clear English speech in the video. Please make sure the video contains clear speech longer than ~10 seconds.")
                 return # Stop execution if transcription failed or is too short
-                
+
             main_progress.progress(90, text="Transcription complete. Analyzing accent...")
-            
+
             # Step 4: Analyze accent
             result, error = analyze_accent(transcript)
-            
+
             if error:
                 st.error(error)
                 return # Stop execution on error
-            
+
             main_progress.progress(100, text="Analysis complete!")
             st.success("✅ Accent Analysis Complete!")
-            
+
             # Display results
             st.header("2. Analysis Results")
-            
+
             col1, col2 = st.columns([1, 1])
-            
+
             with col1:
                 st.subheader("Primary Accent Classification")
-                
+
                 primary_accent = result['accent']
                 confidence = result['confidence']
-                
+
                 # Use a colored box or marker based on confidence
                 if confidence > 75:
                     confidence_color = "green"
@@ -578,7 +608,7 @@ def main():
                     <p>{result['description']}</p>
                 </div>
                 """, unsafe_allow_html=True)
-                
+
                 if result['second_best'] and result['second_best'] != primary_accent:
                     st.markdown(f"""
                     <div style="margin-top: 20px;">
@@ -595,9 +625,9 @@ def main():
 
             with col2:
                 st.subheader("Accent Scores Distribution")
-                
+
                 scores = result['detailed_scores']
-                
+
                 # Prepare data for chart
                 scores_df = pd.DataFrame(list(scores.items()), columns=['Accent', 'Score'])
                 # Sort by score for the bar chart
@@ -609,7 +639,7 @@ def main():
                     use_container_width=True,
                     color="#1f77b4" # A standard blue color
                 )
-                
+
                 # Display raw scores in tabular format
                 st.subheader("Detailed Heuristic Scores")
                 # Add a note about what the scores mean
@@ -645,7 +675,7 @@ def main():
             main_progress.empty() # Hide main progress bar finally
             st.text("Cleaning up temporary files...")
             cleanup_success = True
-            
+
             if video_path and os.path.exists(video_path):
                 try:
                     os.remove(video_path)
