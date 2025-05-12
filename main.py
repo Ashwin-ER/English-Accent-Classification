@@ -21,14 +21,31 @@ import seaborn as sns
 import nltk
 import os
 
-# Specify the custom directory for NLTK data
-nltk_data_dir = 'C:\Users\ashwi\AppData\Roaming\nltk_data'  # Example: Change this to a desired directory
+# Automatically find or create a directory for NLTK data
+def get_nltk_data_dir():
+    # Get the list of NLTK data directories
+    nltk_data_dirs = nltk.data.path
 
-# Set the environment variable to tell NLTK where to look
+    # Try to find a directory with write access
+    for directory in nltk_data_dirs:
+        if os.access(directory, os.W_OK):  # Check if we have write access to the directory
+            return directory
+
+    # If no directory with write access is found, create one in the user's home directory
+    home_dir = os.path.expanduser("~")
+    custom_dir = os.path.join(home_dir, "nltk_data")
+    os.makedirs(custom_dir, exist_ok=True)
+    return custom_dir
+
+# Set the NLTK data path
+nltk_data_dir = get_nltk_data_dir()
 os.environ['NLTK_DATA'] = nltk_data_dir
 
-# Download the 'punkt' tokenizer data into that directory
+# Download the 'punkt' tokenizer data into the valid directory
 nltk.download('punkt', download_dir=nltk_data_dir)
+
+print(f"NLTK data will be stored in: {nltk_data_dir}")
+
 
 
 
