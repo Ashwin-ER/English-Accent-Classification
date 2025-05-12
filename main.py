@@ -19,16 +19,17 @@ import seaborn as sns
 
 # Download necessary NLTK data
 import nltk
+import os
 
-# Set a custom data path suitable for Streamlit Cloud
-nltk_data_dir = '/app/nltk_data'
-nltk.data.path.append(nltk_data_dir)
+# Specify the custom directory for NLTK data
+nltk_data_dir = 'C:\Users\ashwi\AppData\Roaming\nltk_data'  # Example: Change this to a desired directory
 
-# Ensure 'punkt' is downloaded to the custom directory
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt', download_dir=nltk_data_dir, quiet=True)
+# Set the environment variable to tell NLTK where to look
+os.environ['NLTK_DATA'] = nltk_data_dir
+
+# Download the 'punkt' tokenizer data into that directory
+nltk.download('punkt', download_dir=nltk_data_dir)
+
 
 
 # Set page config
