@@ -18,10 +18,18 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Download necessary NLTK data
+import nltk
+
+# Set a custom data path suitable for Streamlit Cloud
+nltk_data_dir = '/main/nltk_data'
+nltk.data.path.append(nltk_data_dir)
+
+# Ensure 'punkt' is downloaded to the custom directory
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
-    nltk.download('punkt', quiet=True)
+    nltk.download('punkt', download_dir=nltk_data_dir, quiet=True)
+
 
 # Set page config
 st.set_page_config(
@@ -320,11 +328,7 @@ def main():
     uploaded_file = st.file_uploader("Or upload a video file:", type=["mp4", "mov", "avi", "webm"])
     
     # Add demo videos
-    st.markdown("""
-    **Try these sample links:**
-    - American accent: https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4
-    - British accent: https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4
-    """)
+
     
     # Process section
     if st.button("Analyze Accent", type="primary"):
