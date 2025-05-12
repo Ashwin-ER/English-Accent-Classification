@@ -17,40 +17,51 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# --- NLTK Setup ---
-# Define the NLTK resource required
+# --- NLTK Setup - Ensure 'punkt' is downloaded and available ---
+# This block runs when the script starts, before the UI is built.
+# Streamlit Cloud will cache successful downloads.
+
 NLTK_DATA_RESOURCE = 'tokenizers/punkt'
+nltk_data_path = os.path.join(tempfile.gettempdir(), "nltk_data") # Suggest a writable temp dir location
+
+# Add the suggested path to NLTK's search path
+# This might help NLTK find data downloaded to the temp directory
+nltk.data.path.append(nltk_data_path)
 
 # Check if the resource is already available
 try:
     nltk.data.find(NLTK_DATA_RESOURCE)
-    # st.info(f"NLTK resource '{NLTK_DATA_RESOURCE}' found.") # Optional success message
+    st.info(f"NLTK resource '{NLTK_DATA_RESOURCE}' found successfully.")
 except LookupError:
     # If not found, attempt to download it
-    st.warning(f"NLTK resource '{NLTK_DATA_RESOURCE}' not found. Attempting download of 'punkt'...")
+    st.warning(f"NLTK resource '{NLTK_DATA_RESOURCE}' not found. Attempting download of 'punkt' to {nltk_data_path}...")
     try:
-        # Download the 'punkt' package
-        nltk.download('punkt', quiet=True)
-        st.success(f"NLTK 'punkt' package downloaded.")
+        # Download the 'punkt' package to the specified path
+        # Remove quiet=True to see download progress/errors in logs
+        nltk.download('punkt', download_dir=nltk_data_path) 
+        st.success(f"NLTK 'punkt' package download attempted.")
+
+        # --- Crucial Check After Download Attempt ---
+        # Verify if the resource is now available
+        try:
+            nltk.data.find(NLTK_DATA_RESOURCE)
+            st.success(f"NLTK resource '{NLTK_DATA_RESOURCE}' verified after download.")
+        except LookupError:
+            # If it's *still* not found after download, something is wrong.
+            st.error(f"""
+            Fatal Error: NLTK resource '{NLTK_DATA_RESOURCE}' is still not found after attempting download.
+            This indicates a potential issue with NLTK data paths or permissions in the environment.
+            NLTK searched paths: {nltk.data.path}
+            Please check the Streamlit Cloud logs for download errors or path issues.
+            The application cannot proceed without this resource for text tokenization.
+            """)
+            st.stop() # Stop the application gracefully if the resource is truly missing
+
     except Exception as e:
-        # Catch potential errors during download
+        # Catch potential errors during the download process itself
         st.error(f"Error during NLTK 'punkt' download: {e}")
         st.error("NLTK download failed. This is required for text processing.")
         st.stop() # Stop the app if download fails
-
-# Final check: Ensure the resource is available AFTER the download attempt
-try:
-    nltk.data.find(NLTK_DATA_RESOURCE)
-    # If we reach here, the resource is confirmed available.
-except LookupError:
-    # If it's *still* not found after the download attempt, something is wrong with the environment or path
-    st.error(f"""
-    Fatal Error: NLTK resource '{NLTK_DATA_RESOURCE}' is still not found after attempting download.
-    This indicates a potential issue with NLTK data paths or permissions in the environment.
-    Please ensure NLTK can write to `/home/appuser/nltk_data` or check Streamlit Cloud logs.
-    The application cannot proceed without this resource for text tokenization.
-    """)
-    st.stop() # Stop the application gracefully if the resource is truly missing
 # --- End NLTK Setup ---
 
 
@@ -263,9 +274,7 @@ def transcribe_audio(audio_path):
 
                 # Using Google's speech recognition (free tier, might have limits)
                 try:
-                    # *** FIX APPLIED HERE: REMOVED timeout=10 ARGUMENT ***
-                    # The 'timeout' argument is not supported in some versions of speech_recognition
-                    # This was the source of the previous error.
+                    # Removed timeout argument as it caused an error in some versions
                     transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False)
                     full_transcript += " " + transcript
                 except sr.UnknownValueError:
@@ -307,13 +316,13 @@ def analyze_accent(transcript):
     text = transcript.lower()
 
     # Tokenize using NLTK's word_tokenize
-    # This is where the 'punkt' resource is used.
+    # This function requires the 'punkt' tokenizer data.
+    # The NLTK setup block at the top should ensure this data is available.
     try:
         words = word_tokenize(text)
-    except LookupError:
-         # This should ideally be caught by the initial NLTK setup block,
-         # but this is a fail-safe in case the resource check wasn't sufficient
-         return None, "NLTK 'punkt' tokenizer data is not available. Please ensure it is downloaded correctly."
+    except LookupError as e:
+         # This block serves as a final fail-safe. The initial setup should prevent reaching here.
+         return None, f"NLTK 'punkt' tokenizer data is not available during tokenization: {e}. Please check NLTK setup at app start."
     except Exception as e:
          return None, f"An unexpected error occurred during text tokenization: {str(e)}"
 
@@ -388,22 +397,14 @@ def analyze_accent(transcript):
     total_score = sum(scores.values())
 
     # Normalize scores to percentages relative to the sum of scores
-    # This gives a sense of the proportion of the total heuristic score
-    # A more sophisticated approach would use probability models or distances
     confidence = 0.0
     if total_score > 0.1: # Check against the small base value
         raw_percentage = (max_score / total_score) * 100
 
-        # Apply a gentle sigmoid-like transformation to spread values,
-        # making low percentages lower and high percentages higher relative to the mean (50%).
-        # The 0.05 and 50 are tuning parameters.
-        # This is still heuristic, not true statistical confidence.
+        # Apply a gentle sigmoid-like transformation
         transformed_confidence = 100 / (1 + np.exp(-0.05 * (raw_percentage - 50)))
 
-        # Further adjust confidence based on the absolute score magnitude
-        # If the total score is very low, the confidence should be low regardless of relative proportion
-        # This prevents a single weak indicator from giving high confidence if other scores are 0
-        # Let's use a simple scaling based on whether the total score is significant
+        # Scale confidence based on whether the total score is significant
         total_score_threshold = 10 # Adjust threshold based on typical scores
         total_score_scaling = min(1.0, total_score / total_score_threshold) # Scales from 0 to 1 up to the threshold
 
@@ -432,7 +433,6 @@ def analyze_accent(transcript):
                  score_ratio = 'Inf' # Should not happen with base score > 0, but defensive
 
             # Adjust confidence based on score ratio - A much higher score for the best accent increases confidence
-            # This is heuristic - apply a small boost/reduction
             if isinstance(score_ratio, (int, float)): # Check if score_ratio is a number
                 if score_ratio < 1.5: # If best score is not much higher than second best
                      confidence = confidence * 0.85 # Reduce confidence slightly
