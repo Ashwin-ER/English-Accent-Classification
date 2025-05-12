@@ -41,37 +41,40 @@ This tool analyzes the speaker's accent from a video. Simply provide a public vi
 2. Transcribe the speech
 3. Analyze the accent
 4. Provide a classification with confidence score
+
+**Note:** This analysis is based on **textual patterns** detected in the transcript,
+not acoustic analysis of pronunciation. The confidence score is a heuristic approximation.
 """)
 
 # Accent feature patterns dictionary
 ACCENT_PATTERNS = {
     "American": {
         "phonetic_patterns": ["r after vowels", "t flapping", "o as 'ah'"], # Simplified representation
-        "word_markers": ["gonna", "wanna", "y'all", "awesome", "totally", "like", "literally"],
+        "word_markers": ["gonna", "wanna", "y'all", "awesome", "totally", "like", "literally", "dude"],
         "spelling_markers": ["color", "center", "defense", "traveling"],
         "description": "Characterized by rhotic pronunciation (pronouncing 'r' after vowels), flapping of 't' sounds, and specific vocabulary."
     },
     "British": {
         "phonetic_patterns": ["non-rhotic", "t glottal stop", "broader 'a'"], # Simplified representation
-        "word_markers": ["proper", "brilliant", "cheers", "mate", "bloody", "quite", "crikey", "rubbish"],
+        "word_markers": ["proper", "brilliant", "cheers", "mate", "bloody", "quite", "crikey", "rubbish", "innit"],
         "spelling_markers": ["colour", "centre", "defence", "travelling"],
         "description": "Typically non-rhotic (dropping 'r' after vowels), with clear 't' pronunciation and distinctive vocabulary."
     },
     "Australian": {
         "phonetic_patterns": ["rising intonation", "i sound change", "non-rhotic"], # Simplified representation
-        "word_markers": ["mate", "no worries", "arvo", "reckon", "heaps", "barbie", "esky"],
+        "word_markers": ["mate", "no worries", "arvo", "reckon", "heaps", "barbie", "esky", "footy"],
         "spelling_markers": ["colour", "centre", "defence", "travelling"],
         "description": "Features rising intonation at sentence ends, extended vowels, and unique slang terms."
     },
     "Indian": {
         "phonetic_patterns": ["retroflex consonants", "v/w confusion", "stress timing"], # Simplified representation
-        "word_markers": ["actually", "itself", "only", "kindly", "prepone", "co-brother", "doubt"],
+        "word_markers": ["actually", "itself", "only", "kindly", "prepone", "co-brother", "doubt", "canteen"],
         "spelling_markers": ["colour", "centre", "defence", "travelling"], # Indian English often follows British spelling
         "description": "Characterized by retroflex consonants, syllable-timing, and specific Indian English vocabulary."
     },
     "Canadian": {
         "phonetic_patterns": ["canadian raising", "rhotic", "about pronunciation"], # Simplified representation
-        "word_markers": ["eh", "sorry", "toque", "washroom", "loonie", "double-double", "chesterfield"],
+        "word_markers": ["eh", "sorry", "toque", "washroom", "loonie", "double-double", "chesterfield", "hoser"],
         "spelling_markers": ["colour", "centre", "defence", "travelling"], # Canadian English often follows British spelling for some words
         "description": "Blends American and British features, with distinctive 'about' pronunciation and unique vocabulary."
     }
@@ -84,9 +87,10 @@ def download_video(url):
         # Create a temporary file
         temp_dir = tempfile.gettempdir()
         # Use a more specific suffix to help systems recognize file type
-        temp_path = os.path.join(temp_dir, f"{uuid.uuid4()}.mp4") 
+        temp_path = os.path.join(temp_dir, f"{uuid.uuid4()}.mp4")
         
         # Handle Loom URLs - This is a heuristic and may break if Loom changes its structure
+        direct_url = url
         if "loom.com" in url:
             # Try to extract video ID from Loom URL
             # This pattern is common but not guaranteed for all Loom share links
@@ -99,33 +103,21 @@ def download_video(url):
                 st.info(f"Attempting direct download from inferred Loom URL: {direct_url}")
             else:
                  # If pattern doesn't match, try the original URL, might fail
-                 direct_url = url
                  st.warning("Loom URL pattern not recognized. Trying original URL directly (may fail).")
-        else:
-            direct_url = url
         
         # Set a timeout and headers to mimic a browser request
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(direct_url, stream=True, timeout=60, headers=headers) # Added timeout
+        # Added timeout for the request itself
+        response = requests.get(direct_url, stream=True, timeout=30, headers=headers) 
         
         # Check for successful response
         response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
         
-        # Get content length for progress bar (optional but nice)
-        total_size_in_bytes = int(response.headers.get('content-length', 0))
-        block_size = 1024*1024 # 1MB chunks
-        progress_placeholder = st.empty()
-        bytes_downloaded = 0
-
         # Save to temporary file
         with open(temp_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=block_size):
+            for chunk in response.iter_content(chunk_size=1024*1024): # 1MB chunks
                 if chunk:
                     f.write(chunk)
-                    bytes_downloaded += len(chunk)
-                    if total_size_in_bytes > 0:
-                         progress = min(1.0, bytes_downloaded / total_size_in_bytes) # Cap progress at 1.0
-                         # Update progress bar within the main progress context (handled in main)
         
         # Check if file was actually downloaded
         if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
@@ -133,10 +125,12 @@ def download_video(url):
              
         return temp_path, None
     
+    except requests.exceptions.Timeout:
+        return None, "Download timed out. The URL was too slow to respond."
     except requests.exceptions.RequestException as req_err:
-        return None, f"Network or Request Error during download: {str(req_err)}"
+        return None, f"Network or Request Error during download: {str(req_err)}. Please check the URL is publicly accessible."
     except Exception as e:
-        return None, f"Error downloading video: {str(e)}"
+        return None, f"An unexpected error occurred during video download: {str(e)}"
 
 # Function to extract audio using FFmpeg directly
 def extract_audio(video_path):
@@ -150,9 +144,11 @@ def extract_audio(video_path):
         # -i <video_path>: Input file
         # -vn: No video output
         # -acodec pcm_s16le: Audio codec (signed 16-bit little-endian PCM - widely compatible WAV format)
-        # -ar 44100: Audio sample rate (44.1 kHz - CD quality)
+        # -ar 16000: Audio sample rate (16 kHz is sufficient for speech recognition and smaller)
         # -ac 1: Audio channels (1 for mono, simplifies transcription)
-        cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1", audio_path, "-y"] # Added -y to overwrite if needed
+        # -y: Overwrite output file without asking
+        # -loglevel error: Suppress verbose FFmpeg output, show only errors
+        cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path, "-y", "-loglevel", "error"] 
         
         # Run FFmpeg command
         # Use capture_output=True and text=True for easier error reading
@@ -162,13 +158,17 @@ def extract_audio(video_path):
         if process.returncode != 0:
             # Log the error output from FFmpeg
             st.error(f"FFmpeg command failed: {' '.join(cmd)}")
-            st.error(f"FFmpeg STDOUT:\n{process.stdout}")
+            # st.error(f"FFmpeg STDOUT:\n{process.stdout}") # Can be noisy
             st.error(f"FFmpeg STDERR:\n{process.stderr}")
-            return None, f"Error extracting audio with FFmpeg: {process.stderr.strip()}"
+            return None, f"Error extracting audio with FFmpeg. FFmpeg Output:\n{process.stderr.strip()}"
         
         # Check if file exists and has size > 0
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-            return None, "Failed to extract audio: Output audio file is empty or doesn't exist."
+            # Try to provide more context if stderr was empty but file wasn't created
+             error_msg = f"Failed to extract audio: Output audio file ({audio_path}) is empty or doesn't exist."
+             if process.stderr:
+                 error_msg += f"\nFFmpeg stderr: {process.stderr.strip()}"
+             return None, error_msg
         
         return audio_path, None
     
@@ -198,43 +198,50 @@ def transcribe_audio(audio_path):
         try:
             audio = AudioSegment.from_wav(audio_path)
         except Exception as e:
-             return None, f"Error loading audio file with pydub: {str(e)}. Ensure it's a valid WAV file."
-             
+             return None, f"Error loading audio file with pydub: {str(e)}. Ensure the extracted file is a valid WAV."
+
         # Split audio into 30-second chunks (to handle large files and API limits)
         chunk_length_ms = 30 * 1000  # 30 seconds
         chunks = [audio[i:i+chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
-        
+
         # Initialize recognizer
         recognizer = sr.Recognizer()
         full_transcript = ""
-        
-        # Process each chunk with a progress indicator
+
         st.info(f"Splitting audio into {len(chunks)} chunks for transcription...")
         
+        chunk_progress_bar = st.progress(0) # Progress bar for chunks
+        
         for i, chunk in enumerate(chunks):
+            # Update progress bar for current chunk
+            chunk_progress = (i + 1) / len(chunks)
+            chunk_progress_bar.progress(chunk_progress)
+            
             # Export chunk to temporary file
+            # Use a unique filename for each chunk attempt
             chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4()}.wav")
             try:
                 chunk.export(chunk_path, format="wav")
             except Exception as e:
                  st.warning(f"Error exporting audio chunk {i+1}: {str(e)}")
                  continue # Skip this chunk
-                 
+
             # Transcribe chunk
             try:
                 with sr.AudioFile(chunk_path) as source:
                     # Adjusting energy threshold can help with background noise, though default is often good
-                    # recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    # recognizer.adjust_for_ambient_noise(source, duration=0.5) # You could uncomment this line
                     audio_data = recognizer.record(source)
-                    
+
                 # Using Google's speech recognition (free tier, might have limits)
                 try:
-                    # Added a timeout for the API request
-                    transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False, timeout=10)
+                    # *** FIX APPLIED HERE: REMOVED timeout=10 ARGUMENT ***
+                    # The 'timeout' argument is not supported in some versions of speech_recognition
+                    transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False) 
                     full_transcript += " " + transcript
                 except sr.UnknownValueError:
                     # API was unable to understand the speech in this chunk
-                    st.info(f"Chunk {i+1}: Speech Recognition could not understand audio.")
+                    # st.info(f"Chunk {i+1}: Speech Recognition could not understand audio.") # Optional: keep this for debug
                     pass # Skip chunk if no speech is detected
                 except sr.RequestError as e:
                     # API was unreachable or unresponsive
@@ -242,6 +249,7 @@ def transcribe_audio(audio_path):
                     # Could potentially stop or continue depending on how critical getting all transcript is
                     pass # Continue to next chunk
                 except Exception as e:
+                    # Catch any other unexpected errors during recognition
                     st.warning(f"An unexpected error occurred during transcription of chunk {i+1}: {str(e)}")
 
             finally:
@@ -251,35 +259,36 @@ def transcribe_audio(audio_path):
                         os.remove(chunk_path)
                  except Exception as e:
                      st.warning(f"Could not remove temporary chunk file {chunk_path}: {str(e)}")
-            
-            # Update progress bar (handled in main)
-            
+
+        chunk_progress_bar.empty() # Hide chunk progress bar
+
         return full_transcript.strip(), None
-    
+
     except Exception as e:
-        return None, f"An unexpected error occurred during audio transcription process: {str(e)}"
+        # Catch any errors that happen outside the chunk loop (e.g., loading audio)
+        return None, f"An unexpected error occurred during the audio transcription process: {str(e)}"
 
 # Function to analyze accent
 def analyze_accent(transcript):
     """Analyze the accent based on transcript"""
-    if not transcript or len(transcript.strip()) < 10: # Check for minimal text
-        return None, "Transcript is too short or empty. Not enough speech detected for analysis."
-    
+    if not transcript or len(transcript.strip()) < 20: # Check for minimal text length
+        return None, "Transcript is too short or empty. Not enough clear speech detected for analysis."
+
     # Lowercased transcript for analysis
     text = transcript.lower()
-    
+
     # Tokenize
     words = word_tokenize(text)
-    
+
     # Track scores for each accent
     # Initialize scores with a small base value to avoid division by zero later if all scores are 0
-    scores = {accent: 0.1 for accent in ACCENT_PATTERNS} 
-    
+    scores = {accent: 0.1 for accent in ACCENT_PATTERNS}
+
     # Analyze word markers
     word_count = Counter(words)
-    total_words = len(words)
+    # total_words = len(words) # Not directly used in scoring logic currently
     unique_words = len(word_count)
-    
+
     # Define weighting factors (can be adjusted)
     WORD_MARKER_WEIGHT = 30
     SPELLING_MARKER_WEIGHT = 10
@@ -288,105 +297,118 @@ def analyze_accent(transcript):
     for accent, patterns in ACCENT_PATTERNS.items():
         # Score 1: Word Markers (proportion of total relevant words or unique words)
         marker_count = sum(word_count.get(marker.lower(), 0) for marker in patterns["word_markers"])
-        # Use presence and frequency, normalized
+        # Use presence and frequency, normalized by unique words
         word_marker_score = (marker_count / max(1, unique_words)) * WORD_MARKER_WEIGHT
         scores[accent] += word_marker_score
-        
+
         # Score 2: Spelling Markers (presence in text)
         spelling_matches = sum(1 for marker in patterns["spelling_markers"] if marker.lower() in text)
         scores[accent] += spelling_matches * SPELLING_MARKER_WEIGHT
-        
+
         # Score 3: Heuristic phonetic pattern checks (based on specific word usage)
-        # These are very rough approximations based on common associated words
+        # These are very rough approximations based on common associated words or spelling variations
         if accent == "American":
             if bool(re.search(r'\b(gonna|wanna|gotta)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.8 # High indicator
             if bool(re.search(r'\b(duty|beauty|city)\b', text)): # Words with potential t-flapping
-                scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.5 
-            if bool(re.search(r'\b(car|start|park)\b', text)): # Rhotic 'r' words
-                scores[accent] += PHONETIC_PATTERN_PATTERN_WEIGHT * 0.6
+                scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.5
+            if bool(re.search(r'\b(car|start|park|water)\b', text)): # Rhotic 'r' words or related patterns
+                scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.6
 
         elif accent == "British":
             if bool(re.search(r'\b(whilst|amongst|learnt|spelt)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.8
-            if bool(re.search(r'\b(schedule|lieutenant|garage)\b', text)):
+            if bool(re.search(r'\b(schedule|lieutenant|garage)\b', text)): # Words pronounced differently
                  scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.5
             # Non-rhotic is harder to detect from text alone, but presence of specific linking R examples might hint
-            if bool(re.search(r'\b(idea of|far East)\b', text)): # Very weak indicator
-                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.2
+            # Example: "idea of" might be transcribed if linking R is used, but this is highly unreliable
+            # if bool(re.search(r'\b(idea of|far East)\b', text)): # Very weak indicator, perhaps remove or reduce weight
+            #      scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.1
 
         elif accent == "Australian":
-            if bool(re.search(r'\b(arvo|brekkie|footy|ute)\b', text)):
+            if bool(re.search(r'\b(arvo|brekkie|footy|ute|mozzie)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 1.0 # Strong slang indicators
-            if bool(re.search(r'\b(reckon|heaps|mate)\b', text)):
+            if bool(re.search(r'\b(reckon|heaps|mate|yeah nah)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.6
-                
+
         elif accent == "Indian":
             if bool(re.search(r'\b(itself|only|kindly|actually)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.7
-            if bool(re.search(r'\b(prepone|timepass|batch-mate|fresher|canteen)\b', text)):
+            if bool(re.search(r'\b(prepone|timepass|batch-mate|fresher|canteen|do the needful)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.9 # Specific Indian English words
-                
+
         elif accent == "Canadian":
-            if bool(re.search(r'\b(eh|toque|washroom|loonie|double-double)\b', text)):
+            if bool(re.search(r'\b(eh|toque|washroom|loonie|double-double|chesterfield)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 1.0 # Strong slang indicators
             if bool(re.search(r'\b(about|house|out)\b', text)):  # Words with potential Canadian raising - very hard to detect from text, this is weak
                  scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.4
 
     # Find best match
     best_accent = max(scores, key=scores.get)
-    
+
     # Calculate confidence
     max_score = scores[best_accent]
     total_score = sum(scores.values())
-    
-    # Normalize scores to percentages relative to the maximum score
-    # This gives a sense of how much each accent contributed to the *total* calculated score
+
+    # Normalize scores to percentages relative to the sum of scores
+    # This gives a sense of the proportion of the total heuristic score
     # A more sophisticated approach would use probability models or distances
+    confidence = 0.0
     if total_score > 0.1: # Check against the small base value
-        confidence = (max_score / total_score) * 100
-        
+        raw_percentage = (max_score / total_score) * 100
+
         # Apply a gentle sigmoid-like transformation to spread values,
-        # making low scores lower and high scores higher relative to the mean.
-        # This is still heuristic, not true statistical confidence.
+        # making low percentages lower and high percentages higher relative to the mean (50%).
         # The 0.05 and 50 are tuning parameters.
-        confidence = 100 / (1 + np.exp(-0.05 * (confidence - 50)))
-        
+        # This is still heuristic, not true statistical confidence.
+        transformed_confidence = 100 / (1 + np.exp(-0.05 * (raw_percentage - 50)))
+
         # Further adjust confidence based on the absolute score magnitude
         # If the total score is very low, the confidence should be low regardless of relative proportion
-        # Example: Scale confidence by a factor based on total score vs max possible score (roughly)
-        max_possible_score = (WORD_MARKER_WEIGHT * len(ACCENT_PATTERNS["American"]["word_markers"])) + \
-                             (SPELLING_MARKER_WEIGHT * len(ACCENT_PATTERNS["American"]["spelling_markers"])) + \
-                             PHONETIC_PATTERN_WEIGHT * 3 # Rough max phonetic hits
-        
-        # Avoid division by zero
-        total_score_factor = min(1.0, total_score / max(1, max_possible_score * 0.5)) # Cap factor at 1, scale by half the max possible
-        confidence = confidence * total_score_factor
+        # This prevents a single weak indicator from giving high confidence if other scores are 0
+        # We can scale confidence based on the total score relative to some expectation
+        # Let's use a simple linear scaling for absolute score impact
+        # max_possible_heuristic_score_rough = (len(ACCENT_PATTERNS["American"]["word_markers"]) * WORD_MARKER_WEIGHT) + \
+        #                                      (len(ACCENT_PATTERNS["American"]["spelling_markers"]) * SPELLING_MARKER_WEIGHT) + \
+        #                                      (3 * PHONETIC_PATTERN_WEIGHT) # Assume max 3 phonetic matches per accent heuristic
 
-    else:
-        confidence = 10 # Very low confidence if no patterns matched significantly
+        # A simpler approach: Just scale by the log of the total score? Or cap based on total?
+        # If total score is very low (e.g., < 5), confidence should be low
+        # Let's use a piecewise function or another sigmoid based on total score
+        total_score_scaling = 1.0
+        if total_score < 5:
+            total_score_scaling = total_score / 5.0 # Scales from 0 to 1 for total scores 0-5
+        elif total_score < 20:
+             total_score_scaling = 0.8 + (total_score - 5) / 15.0 * 0.2 # Scales from 0.8 to 1.0 for total scores 5-20
+
+        confidence = transformed_confidence * total_score_scaling
+
 
     # Cap confidence at a reasonable maximum for a heuristic method
-    confidence = min(round(confidence, 1), 95.0) 
-    
+    confidence = min(round(confidence, 1), 95.0)
+
     # Get next best accent and its score (for comparison)
     scores_copy = scores.copy()
     scores_copy.pop(best_accent, None) # Use pop with default to avoid error if scores is somehow empty
     second_best = None
+    score_ratio = 'N/A'
     if scores_copy:
         second_best = max(scores_copy, key=scores_copy.get)
-        
-    # Calculate the ratio between best and second best score as another confidence indicator
-    best_score_val = scores[best_accent]
-    second_best_score_val = scores_copy.get(second_best, 0.1) # Use default 0.1 if no second best
-    score_ratio = best_score_val / second_best_score_val if second_best_score_val > 0 else float('inf')
+        best_score_val = scores[best_accent]
+        second_best_score_val = scores_copy.get(second_best, 0.1) # Use default 0.1 if no second best
+        if second_best_score_val > 0:
+             score_ratio = round(best_score_val / second_best_score_val, 2)
+        else:
+             score_ratio = 'Inf' # Best score is positive, second best is 0
 
-    # Adjust confidence based on score ratio - A much higher score for the best accent increases confidence
-    if score_ratio < 1.5: # If best score is not much higher than second best
-         confidence = confidence * 0.7 # Reduce confidence
-    elif score_ratio > 3.0: # If best score is significantly higher
-         confidence = min(95.0, confidence * 1.1) # Slightly increase confidence (capped)
-
+        # Adjust confidence based on score ratio - A much higher score for the best accent increases confidence
+        # This is heuristic - apply a small boost/reduction
+        if isinstance(score_ratio, (int, float)):
+            if score_ratio < 1.5: # If best score is not much higher than second best
+                 confidence = confidence * 0.8 # Reduce confidence by 20%
+            elif score_ratio > 3.0: # If best score is significantly higher
+                 confidence = min(95.0, confidence * 1.1) # Slightly increase confidence (capped)
+            confidence = min(round(confidence, 1), 95.0) # Re-cap
 
     result = {
         "accent": best_accent,
@@ -395,9 +417,9 @@ def analyze_accent(transcript):
         "transcript": transcript,
         "detailed_scores": {k: round(v, 2) for k, v in scores.items()},
         "second_best": second_best,
-        "score_ratio": round(score_ratio, 2) if score_ratio != float('inf') else 'N/A'
+        "score_ratio": score_ratio
     }
-    
+
     return result, None
 
 # Function to validate URL
@@ -405,8 +427,7 @@ def is_valid_url(url):
     """Checks if a string is a potentially valid URL"""
     try:
         result = urlparse(url)
-        # Check if scheme and netloc exist. Schemes like http/https are expected.
-        # Adding specific scheme check for robustness
+        # Check if scheme (http/https) and network location exist.
         return all([result.scheme in ['http', 'https'], result.netloc])
     except:
         return False
@@ -418,24 +439,20 @@ def main():
     ffmpeg_installed = check_ffmpeg()
     if not ffmpeg_installed:
         st.error("""
-        ⚠️ FFmpeg is not installed or not found in PATH. This tool requires FFmpeg for audio extraction.
+        ⚠️ FFmpeg command not found. This tool requires FFmpeg for audio extraction.
         
         **For Streamlit Cloud deployment:** Ensure you have a `packages.txt` file in your repository 
         containing the line `ffmpeg`.
         
-        **For local development:** Please install FFmpeg:
-        - Windows: Download from ffmpeg.org and add to PATH
-        - macOS: `brew install ffmpeg`
-        - Linux: `sudo apt install ffmpeg`
-        
-        See installation guides online for detailed instructions.
+        **For local development:** Please install FFmpeg and ensure it's in your system's PATH.
+        (e.g., `brew install ffmpeg` on macOS, `sudo apt update && sudo apt install ffmpeg` on Debian/Ubuntu Linux).
         """)
         st.stop()
     
     # Input section
     st.header("1. Input Video")
     
-    url = st.text_input("Enter public video URL (MP4, MOV, WEBM, AVI or Loom link):", 
+    url = st.text_input("Enter public video URL (MP4, MOV, WEBM, AVI or Loom link):",
                          help="For example: https://loom.com/share/your-video-id or https://example.com/video.mp4")
     
     # Alternatively allow file upload
@@ -481,7 +498,10 @@ def main():
                 # Save uploaded file to temp location
                 main_progress.progress(10, text="Saving uploaded file...")
                 # Ensure file extension is preserved for ffmpeg/pydub
-                ext = os.path.splitext(uploaded_file.name)[1]
+                ext = os.path.splitext(uploaded_file.name)[1].lower() # Get lower case extension
+                if ext not in [".mp4", ".mov", ".avi", ".webm"]:
+                     st.error(f"Unsupported file type: {ext}. Please upload .mp4, .mov, .avi, or .webm.")
+                     return
                 video_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}{ext}")
                 try:
                     with open(video_path, "wb") as f:
@@ -493,6 +513,7 @@ def main():
 
             # Step 2: Extract audio
             main_progress.progress(35, text="Extracting audio...")
+            # Passing video_path acquired from either download or upload
             audio_path, error = extract_audio(video_path)
             
             if error:
@@ -502,15 +523,15 @@ def main():
             
             # Step 3: Transcribe speech
             main_progress.progress(70, text="Transcribing speech...")
-            # The transcribe_audio function now has its own progress info
+            # The transcribe_audio function now has its own progress info within it
             transcript, error = transcribe_audio(audio_path)
             
             if error:
                 st.error(error)
                 return # Stop execution on error
             
-            if not transcript or len(transcript.strip()) < 10:
-                st.error("Could not detect enough speech in the audio. Please make sure the video contains clear English speech and is longer than a few seconds.")
+            if not transcript or len(transcript.strip()) < 20: # Check minimum length again after transcription
+                st.error("Could not detect enough clear English speech in the video. Please make sure the video contains clear speech longer than ~10 seconds.")
                 return # Stop execution if transcription failed or is too short
                 
             main_progress.progress(90, text="Transcription complete. Analyzing accent...")
@@ -536,14 +557,24 @@ def main():
                 primary_accent = result['accent']
                 confidence = result['confidence']
                 
-                st.metric(
-                    label=f"{primary_accent} English", 
-                    value=f"{confidence}% Confidence"
-                )
-                
+                # Use a colored box or marker based on confidence
+                if confidence > 75:
+                    confidence_color = "green"
+                elif confidence > 50:
+                    confidence_color = "orange"
+                else:
+                    confidence_color = "red"
+
                 st.markdown(f"""
-                <div style="padding: 15px; border-radius: 5px; background-color: rgba(14, 17, 23, 0.5); margin-top: 10px;">
-                    <p style="font-size: 1.1em;"><strong>Characteristics of {primary_accent} English:</strong></p>
+                <div style="padding: 15px; border-radius: 5px; border: 2px solid {confidence_color}; background-color: rgba(14, 17, 23, 0.5);">
+                    <h3 style="color: {confidence_color}; margin-top: 0;">{primary_accent} English</h3>
+                    <p style="font-size: 1.2em;"><strong>Confidence:</strong> {confidence}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown(f"""
+                <div style="padding: 15px; border-radius: 5px; background-color: rgba(14, 17, 23, 0.5); margin-top: 20px;">
+                    <p style="font-size: 1.1em; margin-top: 0;"><strong>Characteristics of {primary_accent} English:</strong></p>
                     <p>{result['description']}</p>
                 </div>
                 """, unsafe_allow_html=True)
@@ -551,10 +582,10 @@ def main():
                 if result['second_best'] and result['second_best'] != primary_accent:
                     st.markdown(f"""
                     <div style="margin-top: 20px;">
-                        <p><strong>Secondary accent influence detected:</strong></p>
+                        <p><strong>Potential Secondary Accent Influence:</strong></p>
                     </div>
                     """, unsafe_allow_html=True)
-                    st.info(f"Potentially some influence from **{result['second_best']} English** (Ratio of Best to Second Best Score: {result['score_ratio']})")
+                    st.info(f"Some characteristics suggest **{result['second_best']} English** (Ratio of Best to Second Best Score: {result['score_ratio']})")
                 else:
                      st.markdown("""
                     <div style="margin-top: 20px;">
@@ -567,35 +598,40 @@ def main():
                 
                 scores = result['detailed_scores']
                 
-                # Prepare data for chart - filter out very low scores for clarity in visualization? Or show all?
-                # Let's show all but highlight the main ones
+                # Prepare data for chart
                 scores_df = pd.DataFrame(list(scores.items()), columns=['Accent', 'Score'])
+                # Sort by score for the bar chart
                 scores_df = scores_df.sort_values('Score', ascending=False)
 
-                # Create a bar chart
-                fig, ax = plt.subplots(figsize=(10, 6))
-                sns.barplot(x='Score', y='Accent', data=scores_df, palette='viridis', ax=ax)
-                ax.set_title('Heuristic Score for Each Accent')
-                ax.set_xlabel('Score (Arbitrary Units)')
-                ax.set_ylabel('Accent Type')
-                plt.tight_layout()
-                st.pyplot(fig)
-
+                # Create a bar chart using Streamlit's built-in chart for interactivity
+                st.bar_chart(
+                    scores_df.set_index('Accent'),
+                    use_container_width=True,
+                    color="#1f77b4" # A standard blue color
+                )
+                
                 # Display raw scores in tabular format
-                st.subheader("Detailed Scores")
+                st.subheader("Detailed Heuristic Scores")
+                # Add a note about what the scores mean
+                st.markdown("<small>Scores are arbitrary values based on detected patterns, not a true statistical measure.</small>", unsafe_allow_html=True)
                 st.dataframe(scores_df, use_container_width=True, hide_index=True)
+
 
             # Display transcript
             st.header("3. Transcript")
-            st.text_area("Speech Transcript", result['transcript'], height=200)
-            
+            if result['transcript']:
+                 st.text_area("Speech Transcript", result['transcript'], height=200)
+            else:
+                 st.warning("No transcript could be generated.")
+
             st.info("""
-            **Important Note:** This tool uses rule-based heuristics derived from common vocabulary, spelling, 
-            and simplified phonetic patterns identifiable in text transcripts. It does **not** perform 
-            acoustic analysis of pronunciation.
-            
+            **Important Note:** This tool uses rule-based heuristics derived from common vocabulary, spelling,
+            and simplified phonetic patterns identifiable in text transcripts. It does **not** perform
+            acoustic analysis of pronunciation (e.g., analyzing sounds like vowels, consonants, or intonation patterns directly from the audio waveform).
+
             The classification and confidence score are **approximations** based on these textual cues
-            and should be interpreted with caution. For professional, linguistically accurate accent 
+            and should be interpreted with caution. The output reflects which accent's textual indicators
+            were most present in the *transcription*. For professional, linguistically accurate accent
             evaluation, consult with a trained phonetician or linguist.
             """)
 
@@ -606,21 +642,32 @@ def main():
 
         finally:
             # Clean up temporary files regardless of success or failure
-            main_progress.empty() # Hide progress bar finally
+            main_progress.empty() # Hide main progress bar finally
             st.text("Cleaning up temporary files...")
+            cleanup_success = True
+            
             if video_path and os.path.exists(video_path):
                 try:
                     os.remove(video_path)
-                    # st.write(f"Removed temp video: {video_path}") # For debugging cleanup
                 except Exception as e:
                     st.warning(f"Could not remove temporary video file {video_path}: {str(e)}")
+                    cleanup_success = False
             if audio_path and os.path.exists(audio_path):
                 try:
                     os.remove(audio_path)
-                    # st.write(f"Removed temp audio: {audio_path}") # For debugging cleanup
                 except Exception as e:
                     st.warning(f"Could not remove temporary audio file {audio_path}: {str(e)}")
+                    cleanup_success = False
+
             # Temporary chunk files are attempted to be removed within transcribe_audio
+            # A final check/cleanup for any lingering chunk files could be added here if needed,
+            # but it might be overkill and can sometimes cause issues if files are still being accessed.
+
+            if cleanup_success:
+                 st.text("Temporary files cleaned up.")
+            else:
+                 st.text("Cleanup finished with some warnings.")
+
 
 if __name__ == "__main__":
     main()
