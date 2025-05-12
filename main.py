@@ -234,15 +234,18 @@ def check_ffmpeg():
         return False
 
 
-# Function to transcribe audio
-def transcribe_audio(audio_path):
-    """Transcribe audio file using speech recognition"""
+# Function to transcribe audio - Accepts a callback to update status label
+def transcribe_audio(audio_path, status_callback):
+    """
+    Transcribe audio file using speech recognition.
+    status_callback: A function (e.g., overall_status.update) to update the main status message.
+    """
     try:
         # Load audio file using pydub for processing
-        # Added error handling for loading audio
         try:
             audio = AudioSegment.from_wav(audio_path)
         except Exception as e:
+             status_callback(label="Transcription failed: Error loading audio", state="error")
              return None, f"Error loading audio file with pydub: {str(e)}. Ensure the extracted file is a valid WAV."
 
         # Split audio into 30-second chunks (to handle large files and API limits)
@@ -253,59 +256,60 @@ def transcribe_audio(audio_path):
         recognizer = sr.Recognizer()
         full_transcript = ""
 
-        st.info(f"Splitting audio into {len(chunks)} chunks for transcription...")
+        # Update the main status to show chunk processing progress
+        status_callback(label=f"Transcribing audio: Splitting into {len(chunks)} chunks...", state="running")
 
-        # Use st.status for cleaner progress indication
-        with st.status("Transcribing audio chunks...", expanded=True) as status:
-            for i, chunk in enumerate(chunks):
-                status.write(f"Processing chunk {i+1}/{len(chunks)}...")
-                # Export chunk to temporary file
-                # Use a unique filename for each chunk attempt
-                chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4()}.wav")
+        for i, chunk in enumerate(chunks):
+            # Update status callback label for current chunk
+            status_callback(label=f"Transcribing audio: Processing chunk {i+1}/{len(chunks)}...", state="running")
+
+            # Export chunk to temporary file
+            chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4()}.wav")
+            try:
+                chunk.export(chunk_path, format="wav")
+            except Exception as e:
+                 st.warning(f"Chunk {i+1}: Error exporting audio chunk: {str(e)}. Skipping chunk.")
+                 continue # Skip this chunk
+
+            # Transcribe chunk
+            try:
+                with sr.AudioFile(chunk_path) as source:
+                    # Adjusting energy threshold can help with background noise (optional)
+                    # recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio_data = recognizer.record(source)
+
+                # Using Google's speech recognition (free tier, might have limits)
                 try:
-                    chunk.export(chunk_path, format="wav")
+                    # Removed timeout argument as it caused an error in some versions
+                    transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False)
+                    full_transcript += " " + transcript
+                except sr.UnknownValueError:
+                    # API was unable to understand the speech in this chunk
+                    # st.info(f"Chunk {i+1}: Speech Recognition could not understand audio.") # Optional: keep this for debug
+                    pass # Skip chunk if no speech is detected
+                except sr.RequestError as e:
+                    # API was unreachable or unresponsive
+                    st.error(f"Chunk {i+1}: Could not request results from Google Speech Recognition service; {e}. Skipping chunk.")
+                    pass # Continue to next chunk
                 except Exception as e:
-                     status.warning(f"Error exporting audio chunk {i+1}: {str(e)}")
-                     continue # Skip this chunk
+                    # Catch any other unexpected errors during recognition
+                    st.warning(f"Chunk {i+1}: An unexpected error occurred during transcription: {str(e)}. Skipping chunk.")
 
-                # Transcribe chunk
-                try:
-                    with sr.AudioFile(chunk_path) as source:
-                        # Adjusting energy threshold can help with background noise, though default is often good
-                        # recognizer.adjust_for_ambient_noise(source, duration=0.5) # You could uncomment this line
-                        audio_data = recognizer.record(source)
+            finally:
+                 # Ensure temporary chunk file is removed
+                 try:
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+                 except Exception as e:
+                     st.warning(f"Could not remove temporary chunk file {chunk_path}: {str(e)}")
 
-                    # Using Google's speech recognition (free tier, might have limits)
-                    try:
-                        # Removed timeout argument as it caused an error in some versions
-                        transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False)
-                        full_transcript += " " + transcript
-                    except sr.UnknownValueError:
-                        # API was unable to understand the speech in this chunk
-                        # status.info(f"Chunk {i+1}: Speech Recognition could not understand audio.") # Optional: keep this for debug
-                        pass # Skip chunk if no speech is detected
-                    except sr.RequestError as e:
-                        # API was unreachable or unresponsive
-                        status.error(f"Chunk {i+1}: Could not request results from Google Speech Recognition service; {e}")
-                        # Could potentially stop or continue depending on how critical getting all transcript is
-                        pass # Continue to next chunk
-                    except Exception as e:
-                        # Catch any other unexpected errors during recognition
-                        status.warning(f"An unexpected error occurred during transcription of chunk {i+1}: {str(e)}")
-
-                finally:
-                     # Ensure temporary chunk file is removed
-                     try:
-                        if os.path.exists(chunk_path):
-                            os.remove(chunk_path)
-                     except Exception as e:
-                         status.warning(f"Could not remove temporary chunk file {chunk_path}: {str(e)}")
-            status.update(label="Transcription complete!", state="complete") # Update status when done
-
+        # Transcription complete, update status via callback
+        # The final status update (complete) is handled in main() after the call
         return full_transcript.strip(), None
 
     except Exception as e:
-        # Catch any errors that happen outside the chunk loop (e.g., loading audio)
+        # Catch any errors that happen outside the chunk loop (e.g., splitting)
+        status_callback(label="Transcription failed: Unexpected error", state="error")
         return None, f"An unexpected error occurred during the audio transcription process: {str(e)}"
 
 # Function to analyze accent
@@ -334,7 +338,6 @@ def analyze_accent(transcript):
 
     # Analyze word markers
     word_count = Counter(words)
-    # total_words = len(words) # Not directly used in scoring logic currently
     unique_words = len(word_count)
 
     # Define weighting factors (can be adjusted)
@@ -354,7 +357,6 @@ def analyze_accent(transcript):
         scores[accent] += spelling_matches * SPELLING_MARKER_WEIGHT
 
         # Score 3: Heuristic phonetic pattern checks (based on specific word usage)
-        # These are very rough approximations based on common associated words or spelling variations
         if accent == "American":
             if bool(re.search(r'\b(gonna|wanna|gotta)\b', text)):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.8 # High indicator
@@ -368,10 +370,6 @@ def analyze_accent(transcript):
                 scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.8
             if bool(re.search(r'\b(schedule|lieutenant|garage)\b', text)): # Words pronounced differently
                  scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.5
-            # Non-rhotic is harder to detect from text alone, but presence of specific linking R examples might hint
-            # Example: "idea of" might be transcribed if linking R is used, but this is highly unreliable
-            # if bool(re.search(r'\b(idea of|far East)\b', text)): # Very weak indicator, perhaps remove or reduce weight
-            #      scores[accent] += PHONETIC_PATTERN_WEIGHT * 0.1
 
         elif accent == "Australian":
             if bool(re.search(r'\b(arvo|brekkie|footy|ute|mozzie)\b', text)):
@@ -508,6 +506,7 @@ def main():
 
             video_path = None
             audio_path = None
+            result = None # Initialize result variable outside the try block
 
             try:
                 # Case 1: URL provided
@@ -559,14 +558,12 @@ def main():
                 overall_status.update(label="Audio extracted. Proceeding to transcription...", state="running")
 
                 # Step 3: Transcribe speech
-                overall_status.update(label="Initiating transcription...", state="running")
-                # The transcribe_audio function now has its own status indicator
-                transcript, error = transcribe_audio(audio_path)
+                # Pass the overall_status.update method to transcribe_audio for granular updates
+                transcript, error = transcribe_audio(audio_path, overall_status.update)
 
                 if error:
-                    # The transcribe_audio status handles its specific errors,
-                    # but we update the overall status here if it returned an error
-                    overall_status.update(label="Transcription failed", state="error")
+                    # The transcribe_audio status handles its specific errors and status updates,
+                    # so we just return here after it has updated the status state to error
                     st.error(error) # Display the error returned by transcribe_audio
                     return # Stop execution on error
 
@@ -586,7 +583,7 @@ def main():
                     return # Stop execution on error
 
                 overall_status.update(label="Analysis complete!", state="complete")
-                # The success message is handled outside the status box for clarity
+                # The success message will be displayed below the status box if result exists
 
             except Exception as e:
                 # Catch any unhandled exceptions during the process
@@ -612,18 +609,14 @@ def main():
                         st.warning(f"Could not remove temporary audio file {audio_path}: {str(e)}")
                         cleanup_success = False
 
-                # Temporary chunk files are attempted to be removed within transcribe_audio
-                # A final check/cleanup for any lingering chunk files could be added here if needed,
-                # but it might be overkill and can sometimes cause issues if files are still being accessed.
-
                 if cleanup_success:
                      st.text("Temporary files cleaned up.")
                 else:
                      st.text("Cleanup finished with some warnings.")
 
-        # --- Display results AFTER the main status box is complete ---
-        # Only display results if the process finished without stopping prematurely
-        if 'result' in locals() and result:
+        # --- Display results AFTER the main status box is complete and try/except/finally finishes ---
+        # Only display results if the process finished without stopping prematurely AND produced a result
+        if result: # Check if the result variable was successfully populated
              st.success("✅ Accent Analysis Complete!")
              st.header("2. Analysis Results")
 
