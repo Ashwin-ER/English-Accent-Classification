@@ -445,7 +445,7 @@ def main():
     st.subheader("Try a Demo Video")
     demo_options = {
         "--- Select a demo ---": "", # Use empty string instead of None
-        "American English Demo (Example.com)": "https://file-examples-com.github.io/uploads/2017/04/file_example_MP4_480_1_5MG.mp4",
+        "American English Demo (Example.com)": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4",
         # Add other demo URLs if you have them
         # "British English Demo": "...",
         # "Australian English Demo": "..."
