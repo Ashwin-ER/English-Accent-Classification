@@ -17,16 +17,29 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# --- NLTK Setup - Ensure 'punkt' is downloaded and available ---
-# This block runs when the script starts, before the UI is built.
+# --- Imports must come first ---
+
+# --- SET PAGE CONFIG - MUST be the FIRST Streamlit command ---
+st.set_page_config(
+    page_title="English Accent Analyzer",
+    page_icon="🎤",
+    layout="wide"
+)
+# --- End SET PAGE CONFIG ---
+
+# --- NLTK Setup - Now AFTER st.set_page_config, safe to use st.---
+# This block runs when the script starts, after set_page_config.
 # Streamlit Cloud will cache successful downloads.
 
 NLTK_DATA_RESOURCE = 'tokenizers/punkt'
-nltk_data_path = os.path.join(tempfile.gettempdir(), "nltk_data") # Suggest a writable temp dir location
+# Suggest a writable path within the temporary directory for NLTK data
+nltk_data_temp_path = os.path.join(tempfile.gettempdir(), "nltk_data")
 
 # Add the suggested path to NLTK's search path
-# This might help NLTK find data downloaded to the temp directory
-nltk.data.path.append(nltk_data_path)
+# This helps NLTK find data downloaded to the temp directory.
+# Ensure it's not added multiple times on rerun.
+if nltk_data_temp_path not in nltk.data.path:
+    nltk.data.path.append(nltk_data_temp_path)
 
 # Check if the resource is already available
 try:
@@ -34,20 +47,19 @@ try:
     st.info(f"NLTK resource '{NLTK_DATA_RESOURCE}' found successfully.")
 except LookupError:
     # If not found, attempt to download it
-    st.warning(f"NLTK resource '{NLTK_DATA_RESOURCE}' not found. Attempting download of 'punkt' to {nltk_data_path}...")
+    st.warning(f"NLTK resource '{NLTK_DATA_RESOURCE}' not found. Attempting download of 'punkt' to {nltk_data_temp_path}...")
     try:
         # Download the 'punkt' package to the specified path
-        # Remove quiet=True to see download progress/errors in logs
-        nltk.download('punkt', download_dir=nltk_data_path) 
+        # quiet=False allows seeing download progress/errors in Streamlit Cloud logs
+        nltk.download('punkt', download_dir=nltk_data_temp_path, quiet=False)
         st.success(f"NLTK 'punkt' package download attempted.")
 
         # --- Crucial Check After Download Attempt ---
-        # Verify if the resource is now available
+        # Verify if the resource is now available. If not, report fatal error and stop.
         try:
             nltk.data.find(NLTK_DATA_RESOURCE)
             st.success(f"NLTK resource '{NLTK_DATA_RESOURCE}' verified after download.")
         except LookupError:
-            # If it's *still* not found after download, something is wrong.
             st.error(f"""
             Fatal Error: NLTK resource '{NLTK_DATA_RESOURCE}' is still not found after attempting download.
             This indicates a potential issue with NLTK data paths or permissions in the environment.
@@ -65,14 +77,7 @@ except LookupError:
 # --- End NLTK Setup ---
 
 
-# Set page config
-st.set_page_config(
-    page_title="English Accent Analyzer",
-    page_icon="🎤",
-    layout="wide"
-)
-
-# Title and description
+# Title and description (These can now use st.* commands safely)
 st.title("🎤 English Accent Analyzer")
 st.markdown("""
 This tool analyzes the speaker's accent from a video. Simply provide a public video URL
@@ -220,8 +225,9 @@ def extract_audio(video_path):
 # Adjusted message to be helpful for cloud deployment
 def check_ffmpeg():
     try:
-        process = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=False)
-        return process.returncode == 0
+        # Use a more robust check than just version
+        process = subprocess.run(["ffmpeg", "-h"], capture_output=True, text=True, check=False)
+        return process.returncode == 0 and "usage: ffmpeg" in process.stdout.lower()
     except FileNotFoundError:
         return False
     except Exception:
@@ -249,56 +255,52 @@ def transcribe_audio(audio_path):
 
         st.info(f"Splitting audio into {len(chunks)} chunks for transcription...")
 
-        chunk_progress_bar = st.progress(0) # Progress bar for chunks
-
-        for i, chunk in enumerate(chunks):
-            # Update progress bar for current chunk
-            chunk_progress = (i + 1) / len(chunks)
-            chunk_progress_bar.progress(chunk_progress)
-
-            # Export chunk to temporary file
-            # Use a unique filename for each chunk attempt
-            chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4()}.wav")
-            try:
-                chunk.export(chunk_path, format="wav")
-            except Exception as e:
-                 st.warning(f"Error exporting audio chunk {i+1}: {str(e)}")
-                 continue # Skip this chunk
-
-            # Transcribe chunk
-            try:
-                with sr.AudioFile(chunk_path) as source:
-                    # Adjusting energy threshold can help with background noise, though default is often good
-                    # recognizer.adjust_for_ambient_noise(source, duration=0.5) # You could uncomment this line
-                    audio_data = recognizer.record(source)
-
-                # Using Google's speech recognition (free tier, might have limits)
+        # Use st.status for cleaner progress indication
+        with st.status("Transcribing audio chunks...", expanded=True) as status:
+            for i, chunk in enumerate(chunks):
+                status.write(f"Processing chunk {i+1}/{len(chunks)}...")
+                # Export chunk to temporary file
+                # Use a unique filename for each chunk attempt
+                chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4()}.wav")
                 try:
-                    # Removed timeout argument as it caused an error in some versions
-                    transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False)
-                    full_transcript += " " + transcript
-                except sr.UnknownValueError:
-                    # API was unable to understand the speech in this chunk
-                    # st.info(f"Chunk {i+1}: Speech Recognition could not understand audio.") # Optional: keep this for debug
-                    pass # Skip chunk if no speech is detected
-                except sr.RequestError as e:
-                    # API was unreachable or unresponsive
-                    st.error(f"Chunk {i+1}: Could not request results from Google Speech Recognition service; {e}")
-                    # Could potentially stop or continue depending on how critical getting all transcript is
-                    pass # Continue to next chunk
+                    chunk.export(chunk_path, format="wav")
                 except Exception as e:
-                    # Catch any other unexpected errors during recognition
-                    st.warning(f"An unexpected error occurred during transcription of chunk {i+1}: {str(e)}")
+                     status.warning(f"Error exporting audio chunk {i+1}: {str(e)}")
+                     continue # Skip this chunk
 
-            finally:
-                 # Ensure temporary chunk file is removed
-                 try:
-                    if os.path.exists(chunk_path):
-                        os.remove(chunk_path)
-                 except Exception as e:
-                     st.warning(f"Could not remove temporary chunk file {chunk_path}: {str(e)}")
+                # Transcribe chunk
+                try:
+                    with sr.AudioFile(chunk_path) as source:
+                        # Adjusting energy threshold can help with background noise, though default is often good
+                        # recognizer.adjust_for_ambient_noise(source, duration=0.5) # You could uncomment this line
+                        audio_data = recognizer.record(source)
 
-        chunk_progress_bar.empty() # Hide chunk progress bar
+                    # Using Google's speech recognition (free tier, might have limits)
+                    try:
+                        # Removed timeout argument as it caused an error in some versions
+                        transcript = recognizer.recognize_google(audio_data, language="en-US", key=None, pfilter=0, show_all=False)
+                        full_transcript += " " + transcript
+                    except sr.UnknownValueError:
+                        # API was unable to understand the speech in this chunk
+                        # status.info(f"Chunk {i+1}: Speech Recognition could not understand audio.") # Optional: keep this for debug
+                        pass # Skip chunk if no speech is detected
+                    except sr.RequestError as e:
+                        # API was unreachable or unresponsive
+                        status.error(f"Chunk {i+1}: Could not request results from Google Speech Recognition service; {e}")
+                        # Could potentially stop or continue depending on how critical getting all transcript is
+                        pass # Continue to next chunk
+                    except Exception as e:
+                        # Catch any other unexpected errors during recognition
+                        status.warning(f"An unexpected error occurred during transcription of chunk {i+1}: {str(e)}")
+
+                finally:
+                     # Ensure temporary chunk file is removed
+                     try:
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+                     except Exception as e:
+                         status.warning(f"Could not remove temporary chunk file {chunk_path}: {str(e)}")
+            status.update(label="Transcription complete!", state="complete") # Update status when done
 
         return full_transcript.strip(), None
 
@@ -501,202 +503,215 @@ def main():
             st.error("Please provide either a video URL or upload a video file.")
             return
 
-        # Use a main progress bar for overall steps
-        main_progress = st.progress(0, text="Starting analysis...")
+        # Use st.status for overall progress
+        with st.status("Starting analysis...", expanded=True) as overall_status:
 
-        video_path = None
-        audio_path = None
+            video_path = None
+            audio_path = None
 
-        try:
-            # Case 1: URL provided
-            if url:
-                if not is_valid_url(url):
-                    st.error("Please enter a valid URL (must start with http or https).")
-                    return
+            try:
+                # Case 1: URL provided
+                if url:
+                    if not is_valid_url(url):
+                        overall_status.update(label="Starting analysis... Failed", state="error")
+                        st.error("Please enter a valid URL (must start with http or https).")
+                        return
 
-                # Step 1: Download video
-                main_progress.progress(10, text="Downloading video...")
-                video_path, error = download_video(url)
+                    # Step 1: Download video
+                    overall_status.update(label="Downloading video...", state="running")
+                    video_path, error = download_video(url)
+
+                    if error:
+                        overall_status.update(label="Downloading video... Failed", state="error")
+                        st.error(error)
+                        return # Stop execution on error
+                    overall_status.update(label="Video downloaded. Proceeding to audio extraction...", state="running")
+
+                # Case 2: File uploaded
+                else:
+                    # Save uploaded file to temp location
+                    overall_status.update(label="Saving uploaded file...", state="running")
+                    # Ensure file extension is preserved for ffmpeg/pydub
+                    ext = os.path.splitext(uploaded_file.name)[1].lower() # Get lower case extension
+                    if ext not in [".mp4", ".mov", ".avi", ".webm"]:
+                         overall_status.update(label="Saving uploaded file... Failed", state="error")
+                         st.error(f"Unsupported file type: {ext}. Please upload .mp4, .mov, .avi, or .webm.")
+                         return
+                    video_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}{ext}")
+                    try:
+                        with open(video_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                    except Exception as e:
+                         overall_status.update(label="Saving uploaded file... Failed", state="error")
+                         st.error(f"Error saving uploaded file: {str(e)}")
+                         return
+                    overall_status.update(label="File saved. Proceeding to audio extraction...", state="running")
+
+                # Step 2: Extract audio
+                overall_status.update(label="Extracting audio...", state="running")
+                # Passing video_path acquired from either download or upload
+                audio_path, error = extract_audio(video_path)
 
                 if error:
+                    overall_status.update(label="Extracting audio... Failed", state="error")
                     st.error(error)
                     return # Stop execution on error
-                main_progress.progress(25, text="Video downloaded. Proceeding to audio extraction...")
+                overall_status.update(label="Audio extracted. Proceeding to transcription...", state="running")
 
-            # Case 2: File uploaded
-            else:
-                # Save uploaded file to temp location
-                main_progress.progress(10, text="Saving uploaded file...")
-                # Ensure file extension is preserved for ffmpeg/pydub
-                ext = os.path.splitext(uploaded_file.name)[1].lower() # Get lower case extension
-                if ext not in [".mp4", ".mov", ".avi", ".webm"]:
-                     st.error(f"Unsupported file type: {ext}. Please upload .mp4, .mov, .avi, or .webm.")
-                     return
-                video_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}{ext}")
-                try:
-                    with open(video_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                except Exception as e:
-                     st.error(f"Error saving uploaded file: {str(e)}")
-                     return
-                main_progress.progress(25, text="File saved. Proceeding to audio extraction...")
+                # Step 3: Transcribe speech
+                overall_status.update(label="Initiating transcription...", state="running")
+                # The transcribe_audio function now has its own status indicator
+                transcript, error = transcribe_audio(audio_path)
 
-            # Step 2: Extract audio
-            main_progress.progress(35, text="Extracting audio...")
-            # Passing video_path acquired from either download or upload
-            audio_path, error = extract_audio(video_path)
+                if error:
+                    # The transcribe_audio status handles its specific errors,
+                    # but we update the overall status here if it returned an error
+                    overall_status.update(label="Transcription failed", state="error")
+                    st.error(error) # Display the error returned by transcribe_audio
+                    return # Stop execution on error
 
-            if error:
-                st.error(error)
-                return # Stop execution on error
-            main_progress.progress(60, text="Audio extracted. Proceeding to transcription...")
+                if not transcript or len(transcript.strip()) < 20: # Check minimum length again after transcription
+                    overall_status.update(label="Transcription complete... but transcript too short", state="warning")
+                    st.error("Could not detect enough clear English speech in the video. Please make sure the video contains clear speech longer than ~10 seconds.")
+                    return # Stop execution if transcription failed or is too short
 
-            # Step 3: Transcribe speech
-            main_progress.progress(70, text="Transcribing speech...")
-            # The transcribe_audio function now has its own progress info within it
-            transcript, error = transcribe_audio(audio_path)
+                overall_status.update(label="Transcription complete. Analyzing accent...", state="running")
 
-            if error:
-                st.error(error)
-                return # Stop execution on error
+                # Step 4: Analyze accent
+                result, error = analyze_accent(transcript)
 
-            if not transcript or len(transcript.strip()) < 20: # Check minimum length again after transcription
-                st.error("Could not detect enough clear English speech in the video. Please make sure the video contains clear speech longer than ~10 seconds.")
-                return # Stop execution if transcription failed or is too short
+                if error:
+                    overall_status.update(label="Analyzing accent... Failed", state="error")
+                    st.error(error)
+                    return # Stop execution on error
 
-            main_progress.progress(90, text="Transcription complete. Analyzing accent...")
+                overall_status.update(label="Analysis complete!", state="complete")
+                # The success message is handled outside the status box for clarity
 
-            # Step 4: Analyze accent
-            result, error = analyze_accent(transcript)
+            except Exception as e:
+                # Catch any unhandled exceptions during the process
+                overall_status.update(label="Analysis encountered an unexpected error", state="error")
+                st.error(f"An unexpected error occurred during processing: {str(e)}")
+                st.error("Please try again or try a different video.")
 
-            if error:
-                st.error(error)
-                return # Stop execution on error
+            finally:
+                # Clean up temporary files regardless of success or failure
+                st.text("Cleaning up temporary files...")
+                cleanup_success = True
 
-            main_progress.progress(100, text="Analysis complete!")
-            st.success("✅ Accent Analysis Complete!")
+                if video_path and os.path.exists(video_path):
+                    try:
+                        os.remove(video_path)
+                    except Exception as e:
+                        st.warning(f"Could not remove temporary video file {video_path}: {str(e)}")
+                        cleanup_success = False
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except Exception as e:
+                        st.warning(f"Could not remove temporary audio file {audio_path}: {str(e)}")
+                        cleanup_success = False
 
-            # Display results
-            st.header("2. Analysis Results")
+                # Temporary chunk files are attempted to be removed within transcribe_audio
+                # A final check/cleanup for any lingering chunk files could be added here if needed,
+                # but it might be overkill and can sometimes cause issues if files are still being accessed.
 
-            col1, col2 = st.columns([1, 1])
-
-            with col1:
-                st.subheader("Primary Accent Classification")
-
-                primary_accent = result['accent']
-                confidence = result['confidence']
-
-                # Use a colored box or marker based on confidence
-                if confidence > 75:
-                    confidence_color = "green"
-                elif confidence > 50:
-                    confidence_color = "orange"
+                if cleanup_success:
+                     st.text("Temporary files cleaned up.")
                 else:
-                    confidence_color = "red"
+                     st.text("Cleanup finished with some warnings.")
 
-                st.markdown(f"""
-                <div style="padding: 15px; border-radius: 5px; border: 2px solid {confidence_color}; background-color: rgba(14, 17, 23, 0.5);">
-                    <h3 style="color: {confidence_color}; margin-top: 0;">{primary_accent} English</h3>
-                    <p style="font-size: 1.2em;"><strong>Confidence:</strong> {confidence}%</p>
-                </div>
-                """, unsafe_allow_html=True)
+        # --- Display results AFTER the main status box is complete ---
+        # Only display results if the process finished without stopping prematurely
+        if 'result' in locals() and result:
+             st.success("✅ Accent Analysis Complete!")
+             st.header("2. Analysis Results")
 
-                st.markdown(f"""
-                <div style="padding: 15px; border-radius: 5px; background-color: rgba(14, 17, 23, 0.5); margin-top: 20px;">
-                    <p style="font-size: 1.1em; margin-top: 0;"><strong>Characteristics of {primary_accent} English:</strong></p>
-                    <p>{result['description']}</p>
-                </div>
-                """, unsafe_allow_html=True)
+             col1, col2 = st.columns([1, 1])
 
-                if result['second_best'] and result['second_best'] != primary_accent:
-                    st.markdown(f"""
-                    <div style="margin-top: 20px;">
-                        <p><strong>Potential Secondary Accent Influence:</strong></p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.info(f"Some characteristics suggest **{result['second_best']} English** (Ratio of Best to Second Best Score: {result['score_ratio']})")
-                else:
-                     st.markdown("""
-                    <div style="margin-top: 20px;">
-                        <p>No significant secondary accent influence detected.</p>
-                    </div>
-                    """)
+             with col1:
+                 st.subheader("Primary Accent Classification")
 
-            with col2:
-                st.subheader("Accent Scores Distribution")
+                 primary_accent = result['accent']
+                 confidence = result['confidence']
 
-                scores = result['detailed_scores']
+                 # Use a colored box or marker based on confidence
+                 if confidence > 75:
+                     confidence_color = "green"
+                 elif confidence > 50:
+                     confidence_color = "orange"
+                 else:
+                     confidence_color = "red"
 
-                # Prepare data for chart
-                scores_df = pd.DataFrame(list(scores.items()), columns=['Accent', 'Score'])
-                # Sort by score for the bar chart
-                scores_df = scores_df.sort_values('Score', ascending=False)
+                 st.markdown(f"""
+                 <div style="padding: 15px; border-radius: 5px; border: 2px solid {confidence_color}; background-color: rgba(14, 17, 23, 0.5);">
+                     <h3 style="color: {confidence_color}; margin-top: 0;">{primary_accent} English</h3>
+                     <p style="font-size: 1.2em;"><strong>Confidence:</strong> {confidence}%</p>
+                 </div>
+                 """, unsafe_allow_html=True)
 
-                # Create a bar chart using Streamlit's built-in chart for interactivity
-                st.bar_chart(
-                    scores_df.set_index('Accent'),
-                    use_container_width=True,
-                    color="#1f77b4" # A standard blue color
-                )
+                 st.markdown(f"""
+                 <div style="padding: 15px; border-radius: 5px; background-color: rgba(14, 17, 23, 0.5); margin-top: 20px;">
+                     <p style="font-size: 1.1em; margin-top: 0;"><strong>Characteristics of {primary_accent} English:</strong></p>
+                     <p>{result['description']}</p>
+                 </div>
+                 """, unsafe_allow_html=True)
 
-                # Display raw scores in tabular format
-                st.subheader("Detailed Heuristic Scores")
-                # Add a note about what the scores mean
-                st.markdown("<small>Scores are arbitrary values based on detected patterns, not a true statistical measure.</small>", unsafe_allow_html=True)
-                st.dataframe(scores_df, use_container_width=True, hide_index=True)
+                 if result['second_best'] and result['second_best'] != primary_accent:
+                     st.markdown(f"""
+                     <div style="margin-top: 20px;">
+                         <p><strong>Potential Secondary Accent Influence:</strong></p>
+                     </div>
+                     """, unsafe_allow_html=True)
+                     st.info(f"Some characteristics suggest **{result['second_best']} English** (Ratio of Best to Second Best Score: {result['score_ratio']})")
+                 else:
+                      st.markdown("""
+                     <div style="margin-top: 20px;">
+                         <p>No significant secondary accent influence detected.</p>
+                     </div>
+                     """)
+
+             with col2:
+                 st.subheader("Accent Scores Distribution")
+
+                 scores = result['detailed_scores']
+
+                 # Prepare data for chart
+                 scores_df = pd.DataFrame(list(scores.items()), columns=['Accent', 'Score'])
+                 # Sort by score for the bar chart
+                 scores_df = scores_df.sort_values('Score', ascending=False)
+
+                 # Create a bar chart using Streamlit's built-in chart for interactivity
+                 st.bar_chart(
+                     scores_df.set_index('Accent'),
+                     use_container_width=True,
+                     color="#1f77b4" # A standard blue color
+                 )
+
+                 # Display raw scores in tabular format
+                 st.subheader("Detailed Heuristic Scores")
+                 # Add a note about what the scores mean
+                 st.markdown("<small>Scores are arbitrary values based on detected patterns, not a true statistical measure.</small>", unsafe_allow_html=True)
+                 st.dataframe(scores_df, use_container_width=True, hide_index=True)
 
 
-            # Display transcript
-            st.header("3. Transcript")
-            if result['transcript']:
-                 st.text_area("Speech Transcript", result['transcript'], height=200)
-            else:
-                 st.warning("No transcript could be generated.")
+             # Display transcript
+             st.header("3. Transcript")
+             if result['transcript']:
+                  st.text_area("Speech Transcript", result['transcript'], height=200)
+             else:
+                  st.warning("No transcript could be generated.")
 
-            st.info("""
-            **Important Note:** This tool uses rule-based heuristics derived from common vocabulary, spelling,
-            and simplified phonetic patterns identifiable in text transcripts. It does **not** perform
-            acoustic analysis of pronunciation (e.g., analyzing sounds like vowels, consonants, or intonation patterns directly from the audio waveform).
+             st.info("""
+             **Important Note:** This tool uses rule-based heuristics derived from common vocabulary, spelling,
+             and simplified phonetic patterns identifiable in text transcripts. It does **not** perform
+             acoustic analysis of pronunciation (e.g., analyzing sounds like vowels, consonants, or intonation patterns directly from the audio waveform).
 
-            The classification and confidence score are **approximations** based on these textual cues
-            and should be interpreted with caution. The output reflects which accent's textual indicators
-            were most present in the *transcription*. For professional, linguistically accurate accent
-            evaluation, consult with a trained phonetician or linguist.
-            """)
-
-        except Exception as e:
-            # Catch any unhandled exceptions during the process
-            st.error(f"An unexpected error occurred during processing: {str(e)}")
-            st.error("Please try again or try a different video.")
-
-        finally:
-            # Clean up temporary files regardless of success or failure
-            main_progress.empty() # Hide main progress bar finally
-            st.text("Cleaning up temporary files...")
-            cleanup_success = True
-
-            if video_path and os.path.exists(video_path):
-                try:
-                    os.remove(video_path)
-                except Exception as e:
-                    st.warning(f"Could not remove temporary video file {video_path}: {str(e)}")
-                    cleanup_success = False
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                except Exception as e:
-                    st.warning(f"Could not remove temporary audio file {audio_path}: {str(e)}")
-                    cleanup_success = False
-
-            # Temporary chunk files are attempted to be removed within transcribe_audio
-            # A final check/cleanup for any lingering chunk files could be added here if needed,
-            # but it might be overkill and can sometimes cause issues if files are still being accessed.
-
-            if cleanup_success:
-                 st.text("Temporary files cleaned up.")
-            else:
-                 st.text("Cleanup finished with some warnings.")
+             The classification and confidence score are **approximations** based on these textual cues
+             and should be interpreted with caution. The output reflects which accent's textual indicators
+             were most present in the *transcription*. For professional, linguistically accurate accent
+             evaluation, consult with a trained phonetician or linguist.
+             """)
 
 
 if __name__ == "__main__":
